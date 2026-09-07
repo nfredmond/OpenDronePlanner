@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+evidence/
+.venv*/
+node_modules/
+web/dist/
+*.kmz
+*.tif
+*.tiff
+*.odp.json
