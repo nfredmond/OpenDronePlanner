@@ -4,7 +4,10 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 import hashlib
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl=None
 import io
 import json
 import math
@@ -12,6 +15,7 @@ import os
 import re
 import subprocess
 import tempfile
+import sys
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
@@ -98,6 +102,12 @@ class KdeMtp:
     """Use KDE's existing MTP session, shared with Dolphin, without USB resets."""
 
     def discover(self) -> list[Slot]:
+        if sys.platform!='linux':raise TransferError('Direct USB transfer currently requires Linux/KDE. Export the KMZ for your controller file manager.')
+        if getattr(sys,'frozen',False):
+            helper=Path(__file__).with_name('controller_discover.py')
+            result=subprocess.run(['/usr/bin/python3',str(helper)],capture_output=True,text=True,timeout=90)
+            if result.returncode:raise TransferError('KDE USB support requires python3-dbus, python3-gi and kio-extras. '+result.stderr[-700:])
+            return [Slot(**s) for s in json.loads(result.stdout)]
         import dbus
         # Listing mtp:/ activates KDE's daemon when no file manager is open.
         subprocess.run(['kioclient', '--noninteractive', 'ls', 'mtp:/'],
@@ -170,6 +180,7 @@ class KdeMtp:
 
 def transfer(source: Path, backend: KdeMtp, data_dir: Path = DATA) -> dict:
     """Back up, replace exactly one slot, read it back, and recover on failure."""
+    if fcntl is None: raise TransferError('Direct controller transfer currently requires Linux/KDE. Export KMZ and copy it using the controller file manager.')
     data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (data_dir / 'transfer.lock').open('a') as lock:
         try:

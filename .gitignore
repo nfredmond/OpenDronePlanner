@@ -8,3 +8,9 @@ web/dist/
 *.tif
 *.tiff
 *.odp.json
+
+build/
+dist/
+release/
+packaging/release/
+*.spec

@@ -2,40 +2,61 @@
 """One native planner window. Closing it releases the loopback port."""
 import sys
 from pathlib import Path
-from PyQt6.QtCore import QLockFile, QUrl, Qt
-from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog, QMessageBox
-from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
-from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
+from qt_compat import QLockFile, QUrl, Qt, QTimer, QIcon, QApplication, QMainWindow, QFileDialog, QMessageBox, QTabWidget, QWebEngineView, QWebEnginePage, QWebEngineProfile, QPrinter, QPrintDialog
 from server import start, DATA, ROOT
 
 
 class Page(QWebEnginePage):
+    allowed_ports=[]
+    def javaScriptConsoleMessage(self,level,message,line,source):
+        print(f'Web console {level.name}: {message} ({source}:{line})',flush=True)
+    def createWindow(self,kind):
+        return self.owner.new_web_view().page()
+
     def acceptNavigationRequest(self,url,kind,isMainFrame):
-        return not isMainFrame or url.host()=='127.0.0.1' or url.scheme() in ('about','blob')
+        return not isMainFrame or url.scheme() in ('about','blob') or (url.host()=='127.0.0.1' and url.port() in self.allowed_ports)
 
 
 class Window(QMainWindow):
     def __init__(self,service):
-        super().__init__(); self.service=service
+        super().__init__(); self.service=service;service.native=True
         self.setWindowTitle('OpenDronePlanner'); self.setWindowIcon(QIcon(str(ROOT/'web/public/icon.svg'))); self.resize(1480,960)
         self.view=QWebEngineView(); self.profile=QWebEngineProfile('opendroneplanner',self)
         self.profile.setPersistentStoragePath(str(DATA/'browser')); self.profile.setCachePath(str(DATA/'cache'))
-        self.page=Page(self.profile,self.view); self.view.setPage(self.page); self.setCentralWidget(self.view)
+        self.tabs=QTabWidget();self.tabs.addTab(self.view,'Plan · Fly · Process · Present');self.setCentralWidget(self.tabs)
+        self.page=Page(self.profile,self.view);self.page.owner=self;self.page.allowed_ports=[service.server_port]; self.view.setPage(self.page)
+        self.timer=QTimer(self);self.timer.timeout.connect(self.open_requested);self.timer.start(250)
+        self.web_view=None
         self.page.printRequested.connect(self.print_page); self.profile.downloadRequested.connect(self.download); self.view.setUrl(QUrl(service.origin))
+    def new_web_view(self):
+        view=QWebEngineView();page=Page(self.profile,view);page.owner=self;page.allowed_ports=[self.service.server_port,self.service.processing.port];view.setPage(page)
+        self.tabs.addTab(view,'WebODM · Maps, models & measurements');self.tabs.setCurrentWidget(view)
+        page.printRequested.connect(self.print_page);return view
+    def open_requested(self):
+        url=self.service.processing.open_request
+        if url:
+            self.service.processing.open_request=None
+            if self.web_view is None:self.web_view=self.new_web_view()
+            self.web_view.page().allowed_ports=[self.service.server_port,self.service.processing.port]
+            self.web_view.setUrl(QUrl(url));self.tabs.setCurrentWidget(self.web_view)
     def download(self,item):
-        name,_=QFileDialog.getSaveFileName(self,'Save mission export',str(Path.home()/'Downloads'/item.downloadFileName()))
+        name,_=QFileDialog.getSaveFileName(self,'Save OpenDronePlanner export',str(Path.home()/'Downloads'/item.downloadFileName()))
         if name:
             item.setDownloadDirectory(str(Path(name).parent)); item.setDownloadFileName(Path(name).name); item.accept()
         else: item.cancel()
     def print_page(self):
         self.printer=QPrinter(QPrinter.PrinterMode.HighResolution)
         dialog=QPrintDialog(self.printer,self)
-        if dialog.exec(): self.view.print(self.printer)
+        if dialog.exec(): self.tabs.currentWidget().print(self.printer)
     def closeEvent(self,event):
         if self.service.usb_lock.locked():
             QMessageBox.information(self,'Controller operation in progress','Wait for the USB operation to finish before closing.'); event.ignore(); return
+        try:
+            if self.service.processing.engine_lock.locked() or self.service.processing.active():
+                QMessageBox.information(self,'Processing is active','Finish or cancel processing before closing. Your current upload or reconstruction is still running.');event.ignore();return
+            if self.service.processing.ready:self.service.processing.stop()
+        except Exception as error:
+            QMessageBox.warning(self,'Processing could not stop',str(error));event.ignore();return
         self.service.stop_event.set(); self.service.shutdown(); self.service.server_close(); event.accept()
 
 

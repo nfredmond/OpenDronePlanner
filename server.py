@@ -20,6 +20,7 @@ import uuid
 from planner import generate, review, DEFAULTS
 from formats import import_file, export_kmz, export_split
 from terrain import apply_terrain
+from processing import Processing
 from transfer import KdeMtp, transfer, restore_original, DATA as TRANSFER_DATA, save_json
 
 ROOT=Path(__file__).resolve().parent
@@ -34,6 +35,7 @@ class Service(ThreadingHTTPServer):
         for folder in ('missions','presets','terrain','exports'): (DATA/folder).mkdir(parents=True,exist_ok=True,mode=0o700)
         super().__init__(('127.0.0.1',port),Handler)
         self.origin=f'http://127.0.0.1:{self.server_port}'
+        self.processing=Processing(DATA);self.native=False;self.downloads={}
     def job(self,work):
         ident=uuid.uuid4().hex; future=self.pool.submit(work); self.jobs[ident]=future
         # Drop only completed old jobs; active copies must remain queryable.
@@ -69,10 +71,34 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond({'error':'Cross-origin access refused'},403)
         if path=='/session.js':
             return self.respond(('window.ODP_TOKEN='+json.dumps(self.server.token)+';').encode(),mime='text/javascript')
+        if path.startswith('/webodm/'):
+            if not secrets.compare_digest(path.removeprefix('/webodm/'),self.server.processing.bridge) or not self.server.processing.ready: return self.respond({'error':'Start WebODM first'},403)
+            self.send_response(302);self.send_header('Set-Cookie','sessionid='+self.server.processing.session+'; Path=/; HttpOnly; SameSite=Strict');self.send_header('Location',f'http://127.0.0.1:{self.server.processing.port}/dashboard/');self.end_headers();return
         if path.startswith('/api/'):
-            if not self.authorized(): return self.respond({'error':'Session token required'},403)
+            ticket=parse_qs(urlsplit(self.path).query).get('ticket',[''])[0]
+            grant=self.server.downloads.get(ticket)
+            download_ok=path=='/api/processing/download' and grant and grant['expires']>time.time() and grant['query']==urlsplit(self.path).query.split('&ticket=')[0]
+            if not self.authorized() and not download_ok: return self.respond({'error':'Session token required'},403)
             try:
-                if path=='/api/status': result=dict(name='OpenDronePlanner',version='1.0.0',root=str(ROOT),pid=os.getpid(),offline=self.server.offline,defaults=DEFAULTS)
+                if path=='/api/status': result=dict(name='OpenDronePlanner',version='2.0.0',root=str(ROOT),pid=os.getpid(),offline=self.server.offline,defaults=DEFAULTS)
+                elif path=='/api/processing/status': result=self.server.processing.status()
+                elif path=='/api/processing/captures': result=self.server.processing.captures()
+                elif path=='/api/processing/options': result=self.server.processing.options()
+                elif path=='/api/processing/log':
+                    q=parse_qs(urlsplit(self.path).query);result=self.server.processing.log(q['id'][0],q['run'][0])
+                elif path.startswith('/api/processing/download'):
+                    q=parse_qs(urlsplit(self.path).query);cid=q['id'][0];kind=q['kind'][0]
+                    if kind=='report': data=self.server.processing.report(cid);name='flight-report.html';mime='text/html'
+                    elif kind=='packet': data=self.server.processing.package(cid);name='flight-delivery.zip';mime='application/zip'
+                    elif kind=='asset':
+                        with self.server.processing.asset_response(cid,q['run'][0],q['asset'][0]) as upstream:
+                            self.send_response(200);self.send_header('Content-Type','application/octet-stream');self.send_header('Content-Disposition','attachment; filename="'+q['asset'][0]+'"');self.send_header('Cache-Control','no-store')
+                            if upstream.headers.get('Content-Length'):self.send_header('Content-Length',upstream.headers['Content-Length'])
+                            self.end_headers()
+                            while chunk:=upstream.read(1024*1024):self.wfile.write(chunk)
+                        return
+                    else:raise ValueError('Unknown download.')
+                    self.send_response(200);self.send_header('Content-Type',mime);self.send_header('Content-Length',str(len(data)));self.send_header('Content-Disposition','attachment; filename="'+name+'"');self.end_headers();self.wfile.write(data);return
                 elif path=='/api/library': result={kind:[{**json.loads(p.read_text()),'id':p.stem} for p in (DATA/kind).glob('*.json')] for kind in ('missions','presets')}
                 elif path=='/api/draft': result=json.loads((DATA/'draft.json').read_text()) if (DATA/'draft.json').exists() else None
                 elif path=='/api/profile': result=json.loads((DATA/'profile.json').read_text()) if (DATA/'profile.json').exists() else None
@@ -91,9 +117,31 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized(): return self.respond({'error':'Session token or origin invalid'},403)
         try:
             length=int(self.headers.get('Content-Length','0'))
+            if urlsplit(self.path).path=='/api/processing/upload':
+                q=parse_qs(urlsplit(self.path).query)
+                return self.respond(self.server.processing.upload(q['id'][0],q['name'][0],int(q['offset'][0]),int(q['total'][0]),self.rfile,length))
             if not 0<length<=40*1024*1024: raise ValueError('Request must be under 40 MB.')
             body=json.loads(self.rfile.read(length)); path=urlsplit(self.path).path
-            if path=='/api/draft':
+            if path=='/api/processing/download-ticket':
+                q=urlencode({k:str(body[k]) for k in ('id','kind','run','asset') if k in body});ticket=secrets.token_urlsafe(32)
+                self.server.downloads={k:v for k,v in self.server.downloads.items() if v['expires']>time.time()}
+                self.server.downloads[ticket]={'query':q,'expires':time.time()+120}
+                result={'url':'/api/processing/download?'+q+'&ticket='+ticket}
+            elif path=='/api/processing/create': result=self.server.processing.create(body)
+            elif path=='/api/processing/notes': result=self.server.processing.notes(body)
+            elif path=='/api/processing/start': result=self.server.job(lambda:self.server.processing.start(body))
+            elif path=='/api/processing/stop':
+                if self.server.processing.active():raise ValueError('Cancel or finish active processing before stopping the engine.')
+                result=self.server.job(self.server.processing.stop)
+            elif path=='/api/processing/submit': result=self.server.job(lambda:self.server.processing.submit(body))
+            elif path=='/api/processing/refresh': result=self.server.processing.refresh(body['id'])
+            elif path=='/api/processing/control': result=self.server.processing.control(body)
+            elif path=='/api/processing/open':
+                if not self.server.processing.ready:raise ValueError('Start processing first.')
+                url=self.server.origin+'/webodm/'+self.server.processing.bridge
+                if self.server.native:self.server.processing.open_request=url
+                result={'url':url,'native':self.server.native}
+            elif path=='/api/draft':
                 review(body['mission'])
                 with self.server.data_lock: save_json(DATA/'draft.json',body['mission'])
                 result=dict(saved=True)
