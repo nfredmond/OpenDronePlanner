@@ -90,6 +90,11 @@ class Handler(BaseHTTPRequestHandler):
                     q=parse_qs(urlsplit(self.path).query);cid=q['id'][0];kind=q['kind'][0]
                     if kind=='report': data=self.server.processing.report(cid);name='flight-report.html';mime='text/html'
                     elif kind=='packet': data=self.server.processing.package(cid);name='flight-delivery.zip';mime='application/zip'
+                    elif kind=='prepared':
+                        file=self.server.processing.delivery_path(q['delivery'][0]);self.send_response(200);self.send_header('Content-Type','application/zip');self.send_header('Content-Length',str(file.stat().st_size));self.send_header('Content-Disposition','attachment; filename="complete-flight-delivery.zip"');self.end_headers()
+                        with file.open('rb') as source:
+                            while chunk:=source.read(1024*1024):self.wfile.write(chunk)
+                        return
                     elif kind=='asset':
                         with self.server.processing.asset_response(cid,q['run'][0],q['asset'][0]) as upstream:
                             self.send_response(200);self.send_header('Content-Type','application/octet-stream');self.send_header('Content-Disposition','attachment; filename="'+q['asset'][0]+'"');self.send_header('Cache-Control','no-store')
@@ -123,10 +128,11 @@ class Handler(BaseHTTPRequestHandler):
             if not 0<length<=40*1024*1024: raise ValueError('Request must be under 40 MB.')
             body=json.loads(self.rfile.read(length)); path=urlsplit(self.path).path
             if path=='/api/processing/download-ticket':
-                q=urlencode({k:str(body[k]) for k in ('id','kind','run','asset') if k in body});ticket=secrets.token_urlsafe(32)
+                q=urlencode({k:str(body[k]) for k in ('id','kind','run','asset','delivery') if k in body});ticket=secrets.token_urlsafe(32)
                 self.server.downloads={k:v for k,v in self.server.downloads.items() if v['expires']>time.time()}
                 self.server.downloads[ticket]={'query':q,'expires':time.time()+120}
                 result={'url':'/api/processing/download?'+q+'&ticket='+ticket}
+            elif path=='/api/processing/delivery': result=self.server.job(lambda:self.server.processing.build_delivery(body))
             elif path=='/api/processing/create': result=self.server.processing.create(body)
             elif path=='/api/processing/notes': result=self.server.processing.notes(body)
             elif path=='/api/processing/start': result=self.server.job(lambda:self.server.processing.start(body))

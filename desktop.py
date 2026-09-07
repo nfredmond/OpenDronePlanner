@@ -85,6 +85,6 @@ if __name__=='__main__':
             QTimer.singleShot(1500,click)
         def check(present):
             window.page.runJavaScript("document.querySelector('[data-workflow=process]')?.click()")
-            QTimer.singleShot(1500,lambda:window.page.runJavaScript("({process:document.querySelector('#processing-workspace')?.textContent.includes('Capture library')})",lambda value:finish({'plan':present,**(value or {})})))
+            QTimer.singleShot(1500,lambda:window.page.runJavaScript("JSON.stringify({process:document.querySelector('#processing-workspace')?.textContent.includes('Capture library')})",lambda value:finish({'plan':present,**json.loads(value or '{}')})))
         window.page.loadFinished.connect(loaded);QTimer.singleShot(60000,lambda:finish({'error':'Launch timed out'}))
     sys.exit(app.exec())

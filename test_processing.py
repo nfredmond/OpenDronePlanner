@@ -40,6 +40,7 @@ class CaptureTests(unittest.TestCase):
    self.assertEqual(json.loads(z.read('capture-manifest.json'))['files'][0]['sha256'],hashlib.sha256(b'original image bytes').hexdigest())
  def test_portable_cpu_and_explicit_cuda(self):
   cpu=self.p.compose_config('cpu',8888);gpu=self.p.compose_config('cuda',8888)
+  self.assertEqual(cpu['services']['node-odx-1']['command'],['--parallel_queue_processing','1','--max_concurrency','8' if self.p.config['threads']==8 else str(self.p.config['threads'])])
   self.assertNotIn('gpus',cpu['services']['node-odx-1']);self.assertEqual(gpu['services']['node-odx-1']['gpus'],'all')
   self.assertEqual(cpu['services']['webapp']['ports'],['127.0.0.1:8888:8000'])
   self.assertTrue(all(v['restart']=='no' for v in cpu['services'].values()))
@@ -65,6 +66,21 @@ class CaptureTests(unittest.TestCase):
   with patch.object(self.p,'options',return_value=[{'name':'max-concurrency'}]),patch.object(self.p,'api') as api:
    with self.assertRaisesRegex(ValueError,'not supported'):self.p.submit({'id':self.id,'preset':'custom','options':{'invented':True}})
    api.assert_not_called()
+ def test_full_delivery_verifies_output_bytes(self):
+  c=self.p.read(self.id);c['runs']=[{'id':'run','status':'Completed','assets':['orthophoto.tif'],'mode':'cpu','created':'now','options':{}}];self.p.write(c)
+  class Response(io.BytesIO):
+   headers={'Content-Length':'6'}
+  with patch.object(self.p,'refresh',return_value=c),patch.object(self.p,'asset_response',return_value=Response(b'raster')):
+   result=self.p.build_delivery({'id':self.id,'run':'run','assets':['orthophoto.tif']})
+  with zipfile.ZipFile(self.p.delivery_path(result['id'])) as z:
+   self.assertEqual(z.read('outputs/orthophoto.tif'),b'raster');checks=json.loads(z.read('output-checksums.json'));self.assertEqual(checks[0]['sha256'],hashlib.sha256(b'raster').hexdigest())
+  with patch.object(self.p,'refresh',return_value=c),patch.object(self.p,'asset_response',return_value=Response(b'bad')):
+   with self.assertRaisesRegex(ValueError,'incomplete'):self.p.build_delivery({'id':self.id,'run':'run','assets':['orthophoto.tif']})
+  self.assertFalse(self.p.delivery_lock.locked());self.assertEqual(list((self.p.root/'deliveries').glob('*.partial')),[])
+  with patch.object(self.p,'refresh',return_value=c),patch.object(self.p,'asset_response',return_value=Response(b'raster')) as download:
+   with self.assertRaisesRegex(ValueError,'not available'):self.p.build_delivery({'id':self.id,'run':'run','assets':['secret.txt']})
+   download.assert_not_called()
+
  def test_active_includes_jobs_created_in_full_webodm(self):
   self.p.ready=True
   with patch.object(self.p,'api',side_effect=[[{'id':77}],[{'partial':False,'status':20}]]):self.assertTrue(self.p.active())

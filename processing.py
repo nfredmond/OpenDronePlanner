@@ -51,7 +51,7 @@ class Processing:
     def __init__(self,data):
         self.root=Path(data)/'processing';self.root.mkdir(parents=True,exist_ok=True,mode=0o700)
         self.lock=threading.RLock();self.engine_lock=threading.Lock();self.busy=threading.Event()
-        self.submit_lock=threading.Lock()
+        self.submit_lock=threading.Lock();self.delivery_lock=threading.Lock()
         self.ready=False;self.message='Processing is stopped. Start it when you need it.';self.token=None;self.session=None;self.mode='cpu';self.port=0
         self.bridge=secrets.token_urlsafe(32);self.compose_path=self.root/'compose.json';self.open_request=None
         self.config_path=self.root/'settings.json'
@@ -118,11 +118,11 @@ class Processing:
         if r.returncode:raise ValueError((r.stderr or r.stdout)[-2500:])
         return r.stdout
     def compose(self,*args,timeout=120,input=None):return self.command(['compose','-p','odp-processing','-f',str(self.compose_path),*args],timeout,input)
-    def status(self):return {'ready':self.ready,'message':self.message,'mode':self.mode,'url':f'http://127.0.0.1:{self.port}' if self.ready else None,'presets':PRESETS,'freeGB':round(shutil.disk_usage(self.root).free/1024**3,1),'platform':platform.system(),'threads':self.config['threads'],'busy':self.busy.is_set()}
+    def status(self):return {'ready':self.ready,'message':self.message,'mode':self.mode,'url':f'http://127.0.0.1:{self.port}' if self.ready else None,'presets':PRESETS,'freeGB':round(shutil.disk_usage(self.root).free/1024**3,1),'platform':platform.system(),'threads':self.config['threads'],'busy':self.busy.is_set() or self.delivery_lock.locked()}
     def compose_config(self,mode,port):
         env={'WO_BROKER':'redis://broker:6379','WO_SECRET_KEY':self.config['secret'],'WO_HOST':'127.0.0.1','WO_PORT':str(port),'WO_DEFAULT_NODES':'1','WEB_CONCURRENCY':'2'}
         web={'platform':'linux/amd64','image':WEB_IMAGE,'restart':'no','volumes':['media:/webodm/app/media'],'environment':env}
-        node={'platform':'linux/amd64','image':GPU_IMAGE if mode!='cpu' else CPU_IMAGE,'restart':'no','volumes':['node-data:/var/www/data'],'command':['--max-concurrency','1'],'mem_limit':'16g','cpus':float(self.config['threads'])}
+        node={'platform':'linux/amd64','image':GPU_IMAGE if mode!='cpu' else CPU_IMAGE,'restart':'no','volumes':['node-data:/var/www/data'],'command':['--parallel_queue_processing','1','--max_concurrency',str(self.config['threads'])],'mem_limit':'16g','cpus':float(self.config['threads'])}
         if mode=='cuda':node['gpus']='all'
         if mode=='cdi':node['devices']=['nvidia.com/gpu=all']
         return {'services':{'db':{'platform':'linux/amd64','image':DB_IMAGE,'restart':'no','volumes':['db:/var/lib/postgresql/data']},'broker':{'image':'redis:7.0.10','restart':'no'},'node-odx-1':node,
@@ -260,11 +260,11 @@ print('ODP_AUTH:'+json.dumps({'token':api_settings.JWT_ENCODE_HANDLER(p),'sessio
         c=self.read(cid);run=next(r for r in c['runs'] if r['id']==rid)
         return self.api(self.run_path(c,run)+'output/?line=0')
     def stop(self):
-        if self.busy.is_set():raise ValueError('Wait for the capture upload to finish.')
+        if self.busy.is_set() or self.delivery_lock.locked():raise ValueError('Wait for the capture upload or delivery export to finish.')
         if self.compose_path.exists():self.compose('stop',timeout=90)
         self.ready=False;self.token=None;self.session=None;self.message='Processing stopped. Captures and results are retained.';return self.status()
     def active(self):
-        if self.busy.is_set():return True
+        if self.busy.is_set() or self.delivery_lock.locked():return True
         if not self.ready:return False
         projects=self.api('projects/')
         projects=projects.get('results',[]) if isinstance(projects,dict) else projects
@@ -290,3 +290,40 @@ print('ODP_AUTH:'+json.dumps({'token':api_settings.JWT_ENCODE_HANDLER(p),'sessio
             z.writestr('report.html',self.report(cid));z.writestr('capture-manifest.json',json.dumps(c,indent=2));z.writestr('README.txt','Open report.html in a browser and print to PDF. This packet contains private flight and media metadata. Large imagery and processing outputs are downloaded separately from ODP or WebODM. Checksums identify original imported media; they do not certify positional accuracy.\n')
             if c.get('mission'):z.writestr('flight.odp.json',json.dumps(c['mission'],indent=2))
         return buf.getvalue()
+
+    def build_delivery(self,body):
+        if not self.delivery_lock.acquire(False):raise ValueError('A delivery is already being prepared.')
+        try:
+            c=self.refresh(body['id']);selected=body.get('assets',[])
+            if not isinstance(selected,list) or not selected:raise ValueError('Choose at least one completed output.')
+            rid=body['run'];run=next(r for r in c['runs'] if r['id']==rid)
+            if run['status']!='Completed':raise ValueError('Wait for processing to complete before creating a delivery.')
+            if not set(selected)<=set(run.get('assets',[])):raise ValueError('The selected output is not available.')
+            did=uuid.uuid4().hex;folder=self.root/'deliveries';folder.mkdir(exist_ok=True)
+            temp=folder/(did+'.partial');final=folder/(did+'.zip');receipt=[]
+            try:
+                with zipfile.ZipFile(temp,'w',compression=zipfile.ZIP_STORED,allowZip64=True) as z:
+                    for asset in selected:
+                        filename(asset)
+                        with self.asset_response(c['id'],rid,asset) as source:
+                            expected=int(source.headers.get('Content-Length','0'))
+                            if expected and expected+1024**3>shutil.disk_usage(folder).free:raise ValueError('Insufficient disk space for this delivery. Download outputs separately.')
+                            digest=hashlib.sha256();size=0
+                            with z.open('outputs/'+asset,'w',force_zip64=True) as out:
+                                while chunk:=source.read(1024*1024):
+                                    if shutil.disk_usage(folder).free<len(chunk)+1024**3:raise ValueError('Disk space is low. Delivery stopped without removing any results.')
+                                    out.write(chunk);digest.update(chunk);size+=len(chunk)
+                            if expected and size!=expected:raise ValueError('An output download was incomplete. Retry the delivery.')
+                            receipt.append({'name':asset,'bytes':size,'sha256':digest.hexdigest()})
+                    z.writestr('report.html',self.report(c['id']));z.writestr('capture-manifest.json',json.dumps(c,indent=2));z.writestr('output-checksums.json',json.dumps(receipt,indent=2))
+                    if c.get('mission'):z.writestr('flight.odp.json',json.dumps(c['mission'],indent=2))
+                temp.replace(final)
+            except Exception:
+                if temp.exists():temp.unlink()
+                raise
+            return {'id':did,'size':final.stat().st_size,'assets':receipt}
+        finally:self.delivery_lock.release()
+    def delivery_path(self,did):
+        p=self.root/'deliveries'/(ident(did)+'.zip')
+        if not p.is_file():raise ValueError('Delivery not found.')
+        return p

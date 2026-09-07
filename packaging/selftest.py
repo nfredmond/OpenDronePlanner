@@ -7,6 +7,7 @@ else:exe=root/'dist/OpenDronePlanner'/('OpenDronePlanner.exe' if os.name=='nt' e
 with tempfile.TemporaryDirectory(prefix='odp-bundle-test-') as tmp:
  report=root/'release'/('launch-'+platform.system()+'.json');report.parent.mkdir(exist_ok=True)
  r=subprocess.run([str(exe),'--offline','--self-test',str(report)],env={**os.environ,'ODP_DATA_DIR':tmp},timeout=120)
+ print(report.read_text() if report.exists() else 'No launch report produced',flush=True)
  assert r.returncode==0,('App launch failed',r.returncode)
  d=json.loads(report.read_text());assert d['passed'],d
  with socket.socket() as s:assert s.connect_ex(('127.0.0.1',d['port']))!=0,'Port remained open after app exit'
