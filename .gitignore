@@ -14,3 +14,6 @@ dist/
 release/
 packaging/release/
 *.spec
+
+published/
+release-assets/

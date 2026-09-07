@@ -20,3 +20,15 @@ Run `npm run build` for frontend changes. Python commands use `.venv/bin/python`
 Run the targeted unittest modules and mutation checks listed in README. Mutation runners work in isolated temporary copies and never touch USB. A no-op control must survive before trusting killed mutations. Test reports cannot establish actual flight behavior.
 
 Document expensive findings and remaining work here in docs. Commit natural checkpoints. Do not publish private local history when preparing public exports.
+
+## Processing and distribution
+
+The app now has Plan / Export & controller / Process & present workflows. Read docs/PROCESSING.md and docs/DISTRIBUTION.md. `processing.py` owns capture custody and a dedicated `odp-processing` Compose stack. `web/src/processing.ts` owns its UI. `desktop.py` embeds full WebODM and owns the loopback service lifetime.
+
+Preserve existing independent WebODM installations and their Docker volumes. ODP's containers use restart=no. CPU is the default, CUDA is optional and must pass a real Docker device probe. Pinned engine images currently run linux/amd64, including emulation on Apple Silicon. Do not claim every stage uses GPU or equate startup with successful reconstruction.
+
+Capture originals, settings/credentials, Docker volumes, reports and delivery archives are private data. Do not commit them. A checksum proves byte identity, not positional accuracy. Do not invent checkpoint or flight evidence. Test reconstructions use identified public sample photos in local application data, not synthetic images presented as flight records.
+
+Use the authenticated processing API documented in docs/API.md for agent access. Never print session tokens or generated engine credentials. `--offline` disables controller access; it does not disable Docker or internet maps. Finish/cancel active jobs before stopping the owned stack. App close checks upstream jobs, including those created in the full WebODM tab.
+
+Run test_processing and check_processing_mutations.py alongside the planner/server/transfer checks. Installer builds must launch the bundled root UI, reach Process, record the native screenshot and verify the port closes. A successful build alone does not prove startup. The tag workflow creates a draft release; review four platform results before publishing. Public releases must contain binaries from the tagged source, checksums and launch evidence.

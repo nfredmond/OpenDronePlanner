@@ -45,6 +45,7 @@ def ident(value):
 
 def filename(value):
     if not isinstance(value,str) or not value or len(value)>180 or value in ('.','..') or re.search(r'[/\\\x00-\x1f\x7f";]',value): raise ValueError('Invalid file name.')
+    if value.endswith((' ','.')) or re.search(r'[<>:|?*]',value) or value.split('.')[0].upper() in {'CON','PRN','AUX','NUL',*(f'COM{i}' for i in range(1,10)),*(f'LPT{i}' for i in range(1,10))}: raise ValueError('Invalid file name.')
     return value
 
 
@@ -132,6 +133,7 @@ class Processing:
           'worker':{**web,'entrypoint':['/bin/bash','-c','/webodm/wait-for-postgres.sh db /webodm/wait-for-it.sh -t 0 broker:6379 -- /webodm/wait-for-it.sh -t 0 webapp:8000 -- /webodm/worker.sh start'],'depends_on':['webapp']}},'volumes':{'db':{},'media':{},'node-data':{}}}
     def start(self,body):
         if not self.engine_lock.acquire(False):raise ValueError('The engine is already starting or stopping.')
+        started_here=False
         try:
             if self.ready: return self.status()
             mode=body.get('mode','cpu')
@@ -165,6 +167,7 @@ class Processing:
                 else:raise ValueError('CUDA is unavailable in Docker. Install the NVIDIA Container Toolkit / enable WSL2 GPU support, or choose CPU. '+failures[-1])
             with socket.socket() as s:s.bind(('127.0.0.1',0));self.port=s.getsockname()[1]
             save_json(self.compose_path,self.compose_config(mode,self.port));self.mode=mode
+            started_here=True
             self.compose('up','-d',timeout=1800)
             self.message='WebODM is preparing its database and viewers.'
             deadline=time.monotonic()+240
@@ -177,7 +180,11 @@ class Processing:
             self.authenticate();self.ready=True;self.message='WebODM and ODX are ready. '+('CPU processing.' if mode=='cpu' else 'CUDA container access confirmed. Supported stages use the GPU.')
             return self.status()
         except Exception as e:
-            self.message='Engine start failed: '+str(e);raise
+            self.message='Engine start failed: '+str(e)
+            if started_here:
+                try:self.compose('stop',timeout=90)
+                except Exception:self.message+=' Some containers could not stop. Check Docker before closing.'
+            raise
         finally:self.engine_lock.release()
     def authenticate(self):
         # The local account and cookie are created inside this dedicated database only.
@@ -225,7 +232,7 @@ print('ODP_AUTH:'+json.dumps({'token':api_settings.JWT_ENCODE_HANDLER(p),'sessio
         if not set(opts)<=names:raise ValueError('Options not supported by this engine: '+', '.join(sorted(set(opts)-names)))
         if not self.submit_lock.acquire(False):raise ValueError('Another upload is active.')
         self.busy.set()
-        run={'id':uuid.uuid4().hex,'created':now(),'preset':preset,'mode':self.mode,'options':opts,'status':'Uploading','uploaded':0,'total':len(media)}
+        run={'id':uuid.uuid4().hex,'created':now(),'preset':preset,'mode':self.mode,'engineImage':CPU_IMAGE if self.mode=='cpu' else GPU_IMAGE,'options':opts,'status':'Uploading','uploaded':0,'total':len(media)}
         try:
             project=self.api('projects/',{'name':c['name'],'description':'OpenDronePlanner capture '+c['id']})
             run['project']=project['id']
@@ -275,14 +282,24 @@ print('ODP_AUTH:'+json.dumps({'token':api_settings.JWT_ENCODE_HANDLER(p),'sessio
         if self.busy.is_set() or self.delivery_lock.locked():raise ValueError('Wait for the capture upload or delivery export to finish.')
         if self.compose_path.exists():self.compose('stop',timeout=90)
         self.ready=False;self.token=None;self.session=None;self.message='Processing stopped. Captures and results are retained.';return self.status()
+    def pages(self,path):
+        seen=set()
+        while path:
+            if path in seen:raise ValueError('WebODM returned a repeated results page.')
+            seen.add(path);data=self.api(path)
+            if isinstance(data,list):yield from data;return
+            yield from data.get('results',[])
+            link=data.get('next')
+            if not link:return
+            parsed=urllib.parse.urlsplit(link)
+            if parsed.netloc and parsed.netloc!=f'127.0.0.1:{self.port}':raise ValueError('Unexpected WebODM pagination host.')
+            if not parsed.path.startswith('/api/'):raise ValueError('Unexpected WebODM pagination path.')
+            path=parsed.path[5:]+('?' + parsed.query if parsed.query else '')
     def active(self):
         if self.busy.is_set() or self.delivery_lock.locked():return True
         if not self.ready:return False
-        projects=self.api('projects/')
-        projects=projects.get('results',[]) if isinstance(projects,dict) else projects
-        for project in projects:
-            tasks=self.api(f"projects/{project['id']}/tasks/")
-            tasks=tasks.get('results',[]) if isinstance(tasks,dict) else tasks
+        for project in self.pages('projects/'):
+            tasks=self.pages(f"projects/{project['id']}/tasks/")
             if any(not t.get('partial') and t.get('status') in (None,10,20) for t in tasks):return True
         return False
     def asset_response(self,cid,rid,asset):
@@ -291,6 +308,10 @@ print('ODP_AUTH:'+json.dumps({'token':api_settings.JWT_ENCODE_HANDLER(p),'sessio
         filename(asset)
         req=urllib.request.Request(f'http://127.0.0.1:{self.port}/api/'+self.run_path(c,r)+'download/'+asset,headers={'Authorization':'JWT '+self.token})
         return urllib.request.urlopen(req,timeout=120)
+    def quality_summary(self,r):
+        s=r.get('statistics') or {}
+        values=[('Processed images',r.get('imagesCount')),('Dense points',(s.get('pointcloud') or {}).get('points')),('Covered area, m²',s.get('area')),('Average GSD, cm',s.get('gsd')),('Processing time, minutes',round(r['processingTime']/60000,2) if r.get('processingTime') else None)]
+        return '<table>'+''.join('<tr><th>'+html.escape(k)+'</th><td>'+html.escape(str(v) if v is not None else 'Not reported')+'</td></tr>' for k,v in values)+'</table><p>Engine-reported metrics. GSD is pixel size, not independent positional accuracy. Consult the engine quality PDF and independent checkpoints.</p>'
     def position_diagram(self,c):
         gps=[f['gps'] for f in c['files'] if f.get('gps')]
         if not gps:return '<p>No readable photo positions were recorded.</p>'
@@ -301,7 +322,7 @@ print('ODP_AUTH:'+json.dumps({'token':api_settings.JWT_ENCODE_HANDLER(p),'sessio
         return '<svg viewBox="0 0 880 380" role="img" aria-label="Recorded photo positions"><rect width="880" height="380" fill="#edf3e8"/>'+dots+'</svg><p>Recorded photo positions in EXIF. North is up. This diagram does not establish image overlap, a flown track or survey accuracy.</p>'
     def report(self,cid):
         c=self.read(cid);e=lambda x:html.escape(str(x or ''));rows=''.join(f"<tr><td>{e(f['name'])}</td><td>{e(f['kind'])}</td><td>{f['size']:,}</td><td><code>{f['sha256']}</code></td></tr>" for f in c['files'])
-        runs=''.join(f"<section><h2>{e(r.get('status'))} · {e(r.get('created'))}</h2><p>Engine mode: {e(r['mode'])}. Task: {e(r.get('task'))}</p><pre>{e(json.dumps(r.get('options'),indent=2))}</pre><p>Available outputs: {e(', '.join(r.get('assets',[])) or 'None recorded')}</p><p>{e(r.get('error'))}</p></section>" for r in c['runs'])
+        runs=''.join(f"<section><h2>{e(r.get('status'))} · {e(r.get('created'))}</h2><p>Engine mode: {e(r['mode'])}. Task: {e(r.get('task'))}</p><h3>Requested engine options</h3><pre>{e(json.dumps(r.get('options'),indent=2))}</pre><p>{e(r.get('executionNotes'))}</p>{self.quality_summary(r)}<p>Available outputs: {e(', '.join(r.get('assets',[])) or 'None recorded')}</p><p>{e(r.get('error'))}</p></section>" for r in c['runs'])
         mission=c.get('mission') or {};pts=mission.get('points',[])
         return f'''<!doctype html><html><meta charset="utf-8"><title>{e(c['name'])} | ODP report</title><style>body{{font:15px/1.6 system-ui;max-width:1000px;margin:50px auto;color:#173732;padding:24px}}h1{{font-size:38px}}h2{{border-bottom:1px solid #ddd}}table{{border-collapse:collapse;width:100%;font-size:11px}}td,th{{text-align:left;padding:8px;border-bottom:1px solid #ddd;overflow-wrap:anywhere}}code{{font-size:9px}}pre{{white-space:pre-wrap}}section{{break-inside:avoid}}@media print{{body{{margin:0}}}}</style><p>OPENDRONEPLANNER · FLIGHT AND PROCESSING RECORD</p><h1>{e(c['name'])}</h1><p>Prepared {e(now())}<br>Client: {e(c.get('client'))}<br>Operator: {e(c.get('operator'))}</p><h2>Field record</h2><p>{e(c.get('notes')).replace(chr(10),'<br>')}</p><p>Linked plan: {e(mission.get('name','No plan linked'))}. Planned waypoints: {len(pts)}. Imported files: {len(c['files'])}.</p><h2>Findings</h2><p>{e(c.get('findings') or 'No reviewer findings entered.').replace(chr(10),'<br>')}</p><h2>Limitations and review</h2><p>{e(c.get('limitations') or 'No independent accuracy assessment recorded.').replace(chr(10),'<br>')}</p><p>Processing completion does not establish survey accuracy. Review coordinate and vertical references, independent checkpoints, image coverage and artifacts before relying on measurements. The linked route is a plan, not proof of the actual flight. This report includes location and media metadata.</p><h2>Recorded photo positions</h2>{self.position_diagram(c)}{runs}<h2>Original media manifest</h2><table><thead><tr><th>Name</th><th>Kind</th><th>Bytes</th><th>SHA-256</th></tr></thead><tbody>{rows}</tbody></table></html>'''.encode()
     def package(self,cid):

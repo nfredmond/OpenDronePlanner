@@ -13,11 +13,15 @@ CASES=[
  ('complete output bytes','if expected and size!=expected:', 'if False:',False),
  ('delivery asset allowlist',"if not set(selected)<=set(run.get('assets',[])):",'if False:',False),
  ('thread cap',"'--max_concurrency',str(self.config['threads'])","'--max_concurrency','1'",False),
+ ('portable file names',"raise ValueError('Invalid file name.')\n    return value","pass\n    return value",False),
  ('CPU mode',"if mode=='cuda':node['gpus']='all'","if mode in ('cpu','cuda'):node['gpus']='all'",False),
  ('loopback only',"f'127.0.0.1:{port}:8000'","f'0.0.0.0:{port}:8000'",False),
  ('GPU probe',"else:raise ValueError('CUDA is unavailable in Docker. Install the NVIDIA Container Toolkit / enable WSL2 GPU support, or choose CPU. '+failures[-1])","else:return self.status()",False),
  ('input custody',"if hashlib.file_digest(source,'sha256').hexdigest()!=f['sha256']:","if False:",False),
  ('unsupported options','if not set(opts)<=names:','if False:',False),
+ ('failed startup cleanup',"if started_here:","if False:",False),
+ ('later pages',"if not link:return","return",False),
+ ('pagination host',"if parsed.netloc and parsed.netloc!=f'127.0.0.1:{self.port}':","if False:",False),
  ('full WebODM jobs',"t.get('status') in (None,10,20)","t.get('status') in (None,10)",False),
 ]
 # Keep the path mutation syntactically valid and specifically disable validation.

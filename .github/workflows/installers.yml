@@ -58,6 +58,32 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
+          name: Launch-evidence-${{ matrix.platform }}
+          path: release/launch-*
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
           name: OpenDronePlanner-${{ matrix.platform }}
           path: release/*
           retention-days: 14
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: bundle
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: OpenDronePlanner-*
+          path: release-assets
+      - name: Prepare release and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python packaging/release.py
+          gh release create "$RELEASE_TAG" published/* --draft --title "OpenDronePlanner $RELEASE_TAG" --notes-file docs/RELEASE_NOTES.md

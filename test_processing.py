@@ -17,7 +17,7 @@ class CaptureTests(unittest.TestCase):
   self.assertEqual((self.p.capture_path(self.id)/'media/photo.jpg').read_bytes(),b'abcdef')
   self.assertEqual(self.p.captures()[0]['mission']['name'],'Synthetic flight')
  def test_reject_path_size_offset_and_duplicate(self):
-  for bad in ['../a.jpg','a\\b.jpg','a\n.jpg','a".jpg']:
+  for bad in ['CON.jpg','a:b.jpg','trailing.jpg.'] + ['../a.jpg','a\\b.jpg','a\n.jpg','a".jpg']:
    with self.assertRaisesRegex(ValueError,'file name'):self.upload(bad)
   with self.assertRaises(ValueError):self.p.read('../secret')
   with self.assertRaisesRegex(ValueError,'size'):self.p.upload(self.id,'x.jpg',0,2,io.BytesIO(b'abc'),3)
@@ -85,5 +85,20 @@ class CaptureTests(unittest.TestCase):
   self.p.ready=True
   with patch.object(self.p,'api',side_effect=[[{'id':77}],[{'partial':False,'status':20}]]):self.assertTrue(self.p.active())
   with patch.object(self.p,'api',side_effect=[[{'id':77}],[{'partial':True,'status':None},{'partial':False,'status':40}]]):self.assertFalse(self.p.active())
+
+ def test_failed_new_stack_is_stopped_but_existing_is_preserved(self):
+  with patch.object(self.p,'command',return_value=''),patch.object(self.p,'compose',side_effect=[ValueError('startup failure'),'']) as compose:
+   with self.assertRaisesRegex(ValueError,'startup failure'):self.p.start({'mode':'cpu'})
+   self.assertEqual(compose.call_args_list[-1].args,('stop',))
+  with patch.object(self.p,'command',return_value=''),patch.object(self.p,'compose',return_value='running') as compose,patch.object(self.p,'authenticate',side_effect=ValueError('existing unavailable')):
+   with self.assertRaisesRegex(ValueError,'existing unavailable'):self.p.start({'mode':'cpu'})
+   self.assertEqual(compose.call_count,1)
+
+ def test_active_checks_later_pages_and_rejects_external_pagination(self):
+  self.p.ready=True;self.p.port=9000
+  responses={'projects/':{'results':[{'id':1}],'next':'http://127.0.0.1:9000/api/projects/?page=2'},'projects/1/tasks/':[], 'projects/?page=2':{'results':[{'id':2}],'next':None}, 'projects/2/tasks/':{'results':[{'status':40}],'next':'/api/projects/2/tasks/?page=2'}, 'projects/2/tasks/?page=2':{'results':[{'status':20,'partial':False}],'next':None}}
+  with patch.object(self.p,'api',side_effect=lambda path:responses[path]):self.assertTrue(self.p.active())
+  with patch.object(self.p,'api',return_value={'results':[],'next':'https://example.org/api/projects/?page=2'}):
+   with self.assertRaisesRegex(ValueError,'pagination host'):self.p.active()
 
 if __name__=='__main__':unittest.main()

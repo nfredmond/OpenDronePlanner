@@ -11,7 +11,7 @@ def quoted(path):
     return '"'+str(path).replace('\\','\\\\').replace('"','\\"').replace('`','\\`').replace('$','\\$')+'"'
 
 for name,label,script,comment,icon in [
-    ('opendroneplanner','OpenDronePlanner','launch-planner.sh','Plan, review and export drone waypoint flights',str(ROOT/'web/public/icon.svg')),
+    ('opendroneplanner','OpenDronePlanner','launch-planner.sh','Plan flights, transfer KMZ, process imagery and prepare reports',str(ROOT/'web/public/icon.svg')),
     ('waypoint-transfer','Waypoint Transfer','launch.sh','Drop a KMZ to back up and replace a saved DJI controller flight','mark-location')]:
     body=f'[Desktop Entry]\nType=Application\nName={label}\nComment={comment}\nExec={quoted(ROOT/script)}\nIcon={icon}\nTerminal=false\nCategories=Science;Geography;\nStartupNotify=false\n'
     for path in (apps/(name+'.desktop'),desktop/(label+'.desktop')):
