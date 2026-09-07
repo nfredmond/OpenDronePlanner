@@ -24,7 +24,7 @@ The transport was previously exercised against a connected DJI controller, inclu
 
 Unit tests do not establish DJI Fly firmware acceptance, camera timing in flight, battery performance, airspace authorization, obstacle clearance or terrain survey accuracy. Unknown imported actions remain explicit blockers for rewritten export. The original input remains available for unchanged transfer.
 
-Test screenshots, real flight data, device identifiers and backup receipts are intentionally excluded from the public source history. Public screenshots, if included, contain only explicitly labeled synthetic planning examples.
+Test screenshots, real flight data, device identifiers and backup receipts are intentionally excluded from the public source history. Public screenshots contain explicitly labeled synthetic planning examples or identified public sample reconstruction outputs.
 
 ## Native export and lifecycle checks
 
@@ -63,3 +63,5 @@ These tests mock Docker at the boundary. They cannot prove reconstruction qualit
 The final native Results journey exposed a five-second scroll reset during polling. Results now preserves scroll, selected output checkboxes and the open log. Before/after native screenshots across multiple polls show the selected point-cloud output and scroll position retained while the new CPU run advances. Attempting normal close during that run displayed the active-processing guard and left the engine running.
 
 The Results delivery button opened the native save dialog and wrote a 58,952,623-byte ZIP of real CUDA-run outputs. It contains orthophoto.tif, georeferenced_model.laz, dtm.tif, dsm.tif, report.pdf, ODP report, capture manifest and output checksums. ZIP CRCs and all five SHA-256 checks matched independent reads. Rasterio opened the three rasters with EPSG:32615; orthomosaic 4180×3378 with four bands, DSM/DTM 2507×2026. The capture has no linked private flight. Report findings and limitations saved through the UI. At 390 CSS pixels, the processing library, engine controls, report form and tabs remain readable and reachable.
+
+The 390px report journey reached both delivery buttons. The printable-report button saved HTML through the native file dialog; Qt/Chromium rendered it and printed a five-page PDF. All pages were inspected, including findings, limitations, recorded photo positions, per-run metrics/options, and the complete original-media checksum table. This is a printable processing record; it is not an independently certified survey report.

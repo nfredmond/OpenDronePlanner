@@ -37,6 +37,12 @@ The installers are unsigned, so Windows/macOS may require approval to open them.
 
 ## Capture, reconstruct and deliver
 
+![Reconstructed public Brighton Beach sample in the embedded WebODM map](docs/images/processing-map.png)
+
+![Point cloud generated from the public sample photos](docs/images/processing-3d.png)
+
+These outputs were reconstructed during ODP verification from [Piero Toffanin's public Brighton Beach photos](https://github.com/pierotofy/drone_dataset_brighton_beach). They are not a user flight or an independent accuracy assessment.
+
 - Import photos, videos and matching SRT telemetry, ground control and field records by dropping files or selecting a folder. ODP copies originals, records SHA-256 checksums, and displays readable photo positions.
 - Link each capture to a saved flight snapshot or start an independent capture. Keep multiple processing runs and reviewer notes together.
 - Choose quick preview, map/elevation, detailed model or multispectral presets. Search and edit all options advertised by the running engine.
