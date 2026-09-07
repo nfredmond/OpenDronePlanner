@@ -33,7 +33,7 @@ PRESETS={
 WEB_IMAGE='webodm/webodm_webapp@sha256:ed7b1aa0e40f594539ea5dc6dfeb7ecedd85f13259163974528ef9a1bd78bc1f'
 DB_IMAGE='webodm/webodm_db@sha256:03f18ec0089325ec2b8975ba1781277bcdc212b6d86c9de33f6409d313e90430'
 CPU_IMAGE='webodm/nodeodx@sha256:80250f727dfcf8a90a0a259f0e50f8eedb0f180754243b69137e37b5608d788d'
-GPU_IMAGE='webodm/nodeodx:gpu'
+GPU_IMAGE='webodm/nodeodx@sha256:ea25acb44e5534c8367b1e967755db51244f0c89d2db7c16f5f94097553b6648'
 STATUS={10:'Queued',20:'Processing',30:'Failed',40:'Completed',50:'Canceled'}
 
 
@@ -51,6 +51,7 @@ class Processing:
     def __init__(self,data):
         self.root=Path(data)/'processing';self.root.mkdir(parents=True,exist_ok=True,mode=0o700)
         self.lock=threading.RLock();self.engine_lock=threading.Lock();self.busy=threading.Event()
+        self.submit_lock=threading.Lock()
         self.ready=False;self.message='Processing is stopped. Start it when you need it.';self.token=None;self.session=None;self.mode='cpu';self.port=0
         self.bridge=secrets.token_urlsafe(32);self.compose_path=self.root/'compose.json';self.open_request=None
         self.config_path=self.root/'settings.json'
@@ -59,6 +60,12 @@ class Processing:
     def capture_path(self,cid): return self.root/'captures'/ident(cid)
     def read(self,cid): return json.loads((self.capture_path(cid)/'capture.json').read_text())
     def write(self,c): save_json(self.capture_path(c['id'])/'capture.json',c)
+    def save_run(self,cid,run):
+        with self.lock:
+            latest=self.read(cid);index=next((i for i,r in enumerate(latest['runs']) if r['id']==run['id']),None)
+            if index is None:latest['runs'].append(run)
+            else:latest['runs'][index]=run
+            self.write(latest)
     def captures(self):
         return sorted([json.loads(p.read_text()) for p in (self.root/'captures').glob('*/capture.json')],key=lambda c:c['created'],reverse=True)
     def create(self,body):
@@ -77,7 +84,8 @@ class Processing:
         if shutil.disk_usage(self.root).free<length+1024**3: raise ValueError('Keep at least 1 GB free. Import stopped before the disk filled.')
         key=hashlib.sha256(name.encode()).hexdigest();part=p/(key+'.upload')
         with self.lock:
-            if any(f['name']==name for f in c['files']): raise ValueError('This name already exists in the capture. Use a new capture for another flight.')
+            c=self.read(cid)
+            if any(f['name'].casefold()==name.casefold() for f in c['files']): raise ValueError('This name already exists in the capture. Use a new capture for another flight.')
             if offset==0:
                 with part.open('wb'): pass
             if not part.exists() or part.stat().st_size!=offset: raise ValueError('Upload offset mismatch. Retry this file from the beginning.')
@@ -89,7 +97,7 @@ class Processing:
                     dest.write(block);remaining-=len(block)
                 dest.flush();os.fsync(dest.fileno())
             if offset+length<total:return {'received':offset+length}
-            digest=hashlib.file_digest(part.open('rb'),'sha256').hexdigest()
+            with part.open('rb') as source:digest=hashlib.file_digest(source,'sha256').hexdigest()
             target=p/'media'/name;part.replace(target)
             meta=self.metadata(target);entry={'name':name,'size':total,'sha256':digest,'kind':'photo' if target.suffix.lower() in IMAGES else 'video' if target.suffix.lower() in VIDEOS else 'sidecar',**meta}
             c=self.read(cid);c['files'].append(entry);self.write(c);return {'received':total,'file':entry}
@@ -98,7 +106,7 @@ class Processing:
         try:
             from PIL import Image
             with Image.open(path) as im:
-                ex=im.getexif();result={'width':im.width,'height':im.height,'camera':str(ex.get(272,'')),'captured':str(ex.get(36867,ex.get(306,'')))}
+                ex=im.getexif();result={'width':im.width,'height':im.height,'camera':str(ex.get(272,'')).strip('\x00 '),'captured':str(ex.get(36867,ex.get(306,'')))}
                 gps=ex.get_ifd(34853)
                 def coord(v):return float(v[0])+float(v[1])/60+float(v[2])/3600
                 if gps.get(2) and gps.get(4):result['gps']=[coord(gps[4])*(-1 if gps.get(3)=='W' else 1),coord(gps[2])*(-1 if gps.get(1)=='S' else 1)]
@@ -113,11 +121,11 @@ class Processing:
     def status(self):return {'ready':self.ready,'message':self.message,'mode':self.mode,'url':f'http://127.0.0.1:{self.port}' if self.ready else None,'presets':PRESETS,'freeGB':round(shutil.disk_usage(self.root).free/1024**3,1),'platform':platform.system(),'threads':self.config['threads'],'busy':self.busy.is_set()}
     def compose_config(self,mode,port):
         env={'WO_BROKER':'redis://broker:6379','WO_SECRET_KEY':self.config['secret'],'WO_HOST':'127.0.0.1','WO_PORT':str(port),'WO_DEFAULT_NODES':'1','WEB_CONCURRENCY':'2'}
-        web={'image':WEB_IMAGE,'restart':'no','volumes':['media:/webodm/app/media'],'environment':env}
-        node={'image':GPU_IMAGE if mode!='cpu' else CPU_IMAGE,'restart':'no','volumes':['node-data:/var/www/data'],'command':['--max-concurrency','1'],'mem_limit':'16g','cpus':float(self.config['threads'])}
+        web={'platform':'linux/amd64','image':WEB_IMAGE,'restart':'no','volumes':['media:/webodm/app/media'],'environment':env}
+        node={'platform':'linux/amd64','image':GPU_IMAGE if mode!='cpu' else CPU_IMAGE,'restart':'no','volumes':['node-data:/var/www/data'],'command':['--max-concurrency','1'],'mem_limit':'16g','cpus':float(self.config['threads'])}
         if mode=='cuda':node['gpus']='all'
         if mode=='cdi':node['devices']=['nvidia.com/gpu=all']
-        return {'services':{'db':{'image':DB_IMAGE,'restart':'no','volumes':['db:/var/lib/postgresql/data']},'broker':{'image':'redis:7.0.10','restart':'no'},'node-odx-1':node,
+        return {'services':{'db':{'platform':'linux/amd64','image':DB_IMAGE,'restart':'no','volumes':['db:/var/lib/postgresql/data']},'broker':{'image':'redis:7.0.10','restart':'no'},'node-odx-1':node,
           'webapp':{**web,'ports':[f'127.0.0.1:{port}:8000'],'entrypoint':['/bin/bash','-c','/webodm/wait-for-postgres.sh db /webodm/wait-for-it.sh -t 0 broker:6379 -- /webodm/start.sh'], 'depends_on':['db','broker','node-odx-1']},
           'worker':{**web,'entrypoint':['/bin/bash','-c','/webodm/wait-for-postgres.sh db /webodm/wait-for-it.sh -t 0 broker:6379 -- /webodm/wait-for-it.sh -t 0 webapp:8000 -- /webodm/worker.sh start'],'depends_on':['webapp']}},'volumes':{'db':{},'media':{},'node-data':{}}}
     def start(self,body):
@@ -129,6 +137,12 @@ class Processing:
             self.config['threads']=max(1,min(os.cpu_count() or 2,int(body.get('threads',self.config['threads']))));save_json(self.config_path,self.config)
             self.message='Checking Docker and preparing the processing engine. First download can take several minutes.'
             self.command(['info','--format','{{.ServerVersion}}'])
+            if self.compose_path.exists():
+                running=self.compose('ps','--status','running','-q')
+                if running.strip():
+                    previous=json.loads(self.compose_path.read_text());self.port=int(previous['services']['webapp']['ports'][0].split(':')[1])
+                    node=previous['services']['node-odx-1'];self.mode='cdi' if node.get('devices') else 'cuda' if node.get('gpus') else 'cpu'
+                    self.authenticate();self.ready=True;self.message='Reconnected to the existing processing session. Finish its runs before changing acceleration.';return self.status()
             if mode=='cuda':
                 self.command(['pull',GPU_IMAGE],1800)
                 failures=[]
@@ -175,6 +189,11 @@ print('ODP_AUTH:'+json.dumps({'token':api_settings.JWT_ENCODE_HANDLER(p),'sessio
         try:
             with urllib.request.urlopen(req,timeout=45) as r:return json.load(r)
         except urllib.error.HTTPError as e:
+            if e.code==401:
+                login=urllib.request.Request(f'http://127.0.0.1:{self.port}/api/token-auth/',data=json.dumps({'username':self.config['user'],'password':self.config['password']}).encode(),headers={'Content-Type':'application/json'})
+                with urllib.request.urlopen(login,timeout=30) as r:self.token=json.load(r)['token']
+                req.remove_header('Authorization');req.add_header('Authorization','JWT '+self.token)
+                with urllib.request.urlopen(req,timeout=45) as r:return json.load(r)
             detail=e.read().decode(errors='replace')[:1500]
             raise ValueError(f'WebODM {e.code}: {detail}')
     def options(self):return self.api('processingnodes/options/')
@@ -186,30 +205,32 @@ print('ODP_AUTH:'+json.dumps({'token':api_settings.JWT_ENCODE_HANDLER(p),'sessio
         if sum(f['kind']=='photo' for f in media)<2 and not any(f['kind']=='video' for f in media):raise ValueError('Import at least two photos or one video. Other records stay in the capture archive.')
         preset=body.get('preset','survey')
         if preset not in PRESETS:raise ValueError('Unknown processing preset.')
-        opts={**PRESETS[preset]['options'],**body.get('options',{}),'max-concurrency':self.config['threads']}
+        overrides=body.get('options',{})
+        if not isinstance(overrides,dict):raise ValueError('Engine options must be an object.')
+        opts={**PRESETS[preset]['options'],**overrides,'max-concurrency':self.config['threads']}
         available=self.options();available=available.get('options',[]) if isinstance(available,dict) else available
         names={o['name'] for o in available}
         if not set(opts)<=names:raise ValueError('Options not supported by this engine: '+', '.join(sorted(set(opts)-names)))
+        if not self.submit_lock.acquire(False):raise ValueError('Another upload is active.')
         self.busy.set()
         run={'id':uuid.uuid4().hex,'created':now(),'preset':preset,'mode':self.mode,'options':opts,'status':'Uploading','uploaded':0,'total':len(media)}
         try:
             project=self.api('projects/',{'name':c['name'],'description':'OpenDronePlanner capture '+c['id']})
             run['project']=project['id']
             task=self.api(f"projects/{project['id']}/tasks/",{'name':c['name'],'partial':True,'auto_processing_node':True,'options':[{'name':k,'value':v} for k,v in opts.items()]})
-            run['task']=task['id'];c['runs'].append(run);self.write(c)
+            run['task']=task['id'];self.save_run(c['id'],run)
             for f in media:
                 p=self.capture_path(c['id'])/'media'/f['name']
                 with p.open('rb') as source:
                     if hashlib.file_digest(source,'sha256').hexdigest()!=f['sha256']:raise ValueError('An imported file changed on disk: '+f['name'])
                 self.send_file(self.run_path(c,run)+'upload/',p)
-                run['uploaded']+=1;self.write(c)
+                run['uploaded']+=1;self.save_run(c['id'],run)
             response=self.api(self.run_path(c,run)+'commit/',{})
-            run['status']=STATUS.get(response.get('status'),'Queued');self.write(c);return c
+            run['status']=STATUS.get(response.get('status'),'Queued');self.save_run(c['id'],run);return self.read(c['id'])
         except Exception as e:
             run['status']='Upload failed';run['error']=str(e)
-            if run not in c['runs']:c['runs'].append(run)
-            self.write(c);raise
-        finally:self.busy.clear()
+            self.save_run(c['id'],run);raise
+        finally:self.busy.clear();self.submit_lock.release()
     def send_file(self,path,file):
         boundary='odp'+uuid.uuid4().hex
         head=(f'--{boundary}\r\nContent-Disposition: form-data; name="images"; filename="{file.name}"\r\nContent-Type: application/octet-stream\r\n\r\n').encode()
@@ -233,6 +254,7 @@ print('ODP_AUTH:'+json.dumps({'token':api_settings.JWT_ENCODE_HANDLER(p),'sessio
         c=self.read(body['id']);run=next(r for r in c['runs'] if r['id']==body['run'])
         action=body['action']
         if action not in ('cancel','restart'):raise ValueError('Unsupported task action.')
+        if self.busy.is_set():raise ValueError('Wait for the current upload to finish.')
         self.api(self.run_path(c,run)+action+'/',{});return self.refresh(c['id'])
     def log(self,cid,rid):
         c=self.read(cid);run=next(r for r in c['runs'] if r['id']==rid)
@@ -244,9 +266,12 @@ print('ODP_AUTH:'+json.dumps({'token':api_settings.JWT_ENCODE_HANDLER(p),'sessio
     def active(self):
         if self.busy.is_set():return True
         if not self.ready:return False
-        for c in self.captures():
-            for r in self.refresh(c['id'])['runs']:
-                if r['status'] in ('Queued','Processing','Uploading'):return True
+        projects=self.api('projects/')
+        projects=projects.get('results',[]) if isinstance(projects,dict) else projects
+        for project in projects:
+            tasks=self.api(f"projects/{project['id']}/tasks/")
+            tasks=tasks.get('results',[]) if isinstance(tasks,dict) else tasks
+            if any(not t.get('partial') and t.get('status') in (None,10,20) for t in tasks):return True
         return False
     def asset_response(self,cid,rid,asset):
         c=self.read(cid);r=next(x for x in c['runs'] if x['id']==rid)

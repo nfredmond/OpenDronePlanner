@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """One native planner window. Closing it releases the loopback port."""
 import sys
+import json
 from pathlib import Path
 from qt_compat import QLockFile, QUrl, Qt, QTimer, QIcon, QApplication, QMainWindow, QFileDialog, QMessageBox, QTabWidget, QWebEngineView, QWebEnginePage, QWebEngineProfile, QPrinter, QPrintDialog
 from server import start, DATA, ROOT
@@ -67,4 +68,23 @@ if __name__=='__main__':
     lock=QLockFile(str(DATA/'desktop.lock'))
     if not lock.tryLock(100):
         QMessageBox.information(None,'OpenDronePlanner','OpenDronePlanner is already open. Select it on the taskbar.'); sys.exit(0)
-    service=start(offline='--offline' in sys.argv); window=Window(service); window.show(); sys.exit(app.exec())
+    service=start(offline='--offline' in sys.argv); window=Window(service); window.show()
+    if '--self-test' in sys.argv:
+        output=Path(sys.argv[sys.argv.index('--self-test')+1]);done={'value':False}
+        def finish(value):
+            if done['value']:return
+            done['value']=True
+            passed=bool(value and value.get('plan') and value.get('process'))
+            output.write_text(json.dumps({'passed':passed,'port':service.server_port,'root':str(ROOT),'platform':sys.platform,'ui':value},indent=2))
+            if passed:window.grab().save(str(output.with_suffix('.png')))
+            window.close();app.exit(0 if passed else 1)
+        def loaded(ok):
+            if not ok:finish({'error':'Page failed to load'});return
+            def click():
+                window.page.runJavaScript("Boolean(document.querySelector('#map') && document.querySelector('[data-workflow=process]'))",lambda present:check(present))
+            QTimer.singleShot(1500,click)
+        def check(present):
+            window.page.runJavaScript("document.querySelector('[data-workflow=process]')?.click()")
+            QTimer.singleShot(1500,lambda:window.page.runJavaScript("({process:document.querySelector('#processing-workspace')?.textContent.includes('Capture library')})",lambda value:finish({'plan':present,**(value or {})})))
+        window.page.loadFinished.connect(loaded);QTimer.singleShot(60000,lambda:finish({'error':'Launch timed out'}))
+    sys.exit(app.exec())

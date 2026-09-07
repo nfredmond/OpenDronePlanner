@@ -32,8 +32,15 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: python -m pip install -r packaging/requirements.txt
-      - run: python -B -m unittest test_planner test_server
+      - run: python -B -m unittest test_planner test_server test_processing
       - run: python packaging/build.py
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libegl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0 libnss3 libasound2t64
+          xvfb-run -a python packaging/selftest.py
+      - if: runner.os != 'Linux'
+        run: python packaging/selftest.py
       - if: runner.os == 'Linux'
         run: python packaging/linux.py
       - if: runner.os == 'Windows'

@@ -46,6 +46,18 @@ class ApiTests(unittest.TestCase):
     def test_bad_host_and_traversal(self):
         self.assertEqual(self.request('/api/status',{'Host':'attacker.invalid','X-ODP-Token':self.service.token})[0],403)
         self.assertEqual(self.request('/../../server.py')[0],404)
+    def test_processing_download_ticket_is_scoped_and_expires(self):
+        headers={'X-ODP-Token':self.service.token}
+        code,body=self.request('/api/processing/create',headers,{'name':'Synthetic capture'})
+        self.assertEqual(code,200);cid=json.loads(body)['id']
+        code,body=self.request('/api/processing/download-ticket',headers,{'id':cid,'kind':'report'})
+        self.assertEqual(code,200);url=json.loads(body)['url']
+        self.assertEqual(self.request(url)[0],200)
+        self.assertEqual(self.request(url.replace('kind=report','kind=packet'))[0],403)
+        self.assertEqual(self.request(url+'wrong')[0],403)
+        ticket=url.split('ticket=')[1];self.service.downloads[ticket]['expires']=0
+        self.assertEqual(self.request(url)[0],403)
+
     def test_offline_blocks_controller_mutation(self):
         with self.assertRaisesRegex(ValueError,'disabled'):self.service.usb(lambda:None)
         self.assertEqual(self.request('/api/reset-slot',{'X-ODP-Token':self.service.token},{} )[0],400)

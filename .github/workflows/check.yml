@@ -14,5 +14,5 @@ jobs:
       - run: npm ci && npm run build
       - run: sudo apt-get update && sudo apt-get install -y python3-venv python3-dbus python3-gi python3-pyqt6
       - run: /usr/bin/python3 -m venv --system-site-packages .venv && .venv/bin/python -m pip install -r requirements.txt
-      - run: .venv/bin/python -B -m unittest -v test_planner test_server test_transfer test_mtp test_drop
-      - run: .venv/bin/python -B check_planner_mutations.py && .venv/bin/python -B check_mutations.py
+      - run: .venv/bin/python -B -m unittest -v test_planner test_server test_transfer test_mtp test_drop test_processing
+      - run: .venv/bin/python -B check_planner_mutations.py && .venv/bin/python -B check_mutations.py && .venv/bin/python -B check_processing_mutations.py
