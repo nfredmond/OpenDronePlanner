@@ -115,8 +115,9 @@ class Handler(BaseHTTPRequestHandler):
                 else: return self.respond({'error':'Not found'},404)
                 return self.respond(result)
             except Exception as e: return self.respond({'error':str(e)},400)
-        target=(ROOT/'web/dist'/('index.html' if path=='/' else path.lstrip('/'))).resolve()
-        if not target.is_relative_to(ROOT/'web/dist') or not target.is_file(): return self.respond({'error':'Not found'},404)
+        asset_root=(ROOT/'web/dist').resolve()
+        target=(asset_root/('index.html' if path=='/' else path.lstrip('/'))).resolve()
+        if not target.is_relative_to(asset_root) or not target.is_file(): return self.respond({'error':'Not found'},404)
         return self.respond(target.read_bytes(),mime=mimetypes.guess_type(target)[0] or 'application/octet-stream')
     def do_POST(self):
         if not self.authorized(): return self.respond({'error':'Session token or origin invalid'},403)

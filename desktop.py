@@ -3,7 +3,7 @@
 import sys
 import json
 from pathlib import Path
-from qt_compat import QLockFile, QUrl, Qt, QTimer, QIcon, QApplication, QMainWindow, QFileDialog, QMessageBox, QTabWidget, QWebEngineView, QWebEnginePage, QWebEngineProfile, QPrinter, QPrintDialog
+from qt_compat import QLockFile, QUrl, Qt, QTimer, QIcon, QDesktopServices, QApplication, QMainWindow, QFileDialog, QMessageBox, QTabWidget, QWebEngineView, QWebEnginePage, QWebEngineProfile, QPrinter, QPrintDialog
 from server import start, DATA, ROOT
 
 
@@ -15,6 +15,7 @@ class Page(QWebEnginePage):
         return self.owner.new_web_view().page()
 
     def acceptNavigationRequest(self,url,kind,isMainFrame):
+        if isMainFrame and url.scheme()=='https':QDesktopServices.openUrl(url);return False
         return not isMainFrame or url.scheme() in ('about','blob') or (url.host()=='127.0.0.1' and url.port() in self.allowed_ports)
 
 

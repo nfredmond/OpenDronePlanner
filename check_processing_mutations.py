@@ -38,11 +38,12 @@ with tempfile.TemporaryDirectory(prefix='odp-ticket-mutations-') as tmp:
  for f in ROOT.glob('*.py'):shutil.copy2(f,d/f.name)
  source=(d/'server.py').read_text()
  for name,old,new in [
+  ('packaged resources',"target.is_relative_to(asset_root)","target.is_relative_to(ROOT/'web/dist')"),
   ('ticket query scope',"grant['query']==urlsplit(self.path).query.split('&ticket=')[0]",'True'),
   ('ticket expiration',"grant['expires']>time.time()",'True'),
   ('ticket identity',"self.server.downloads.get(ticket)","next(iter(self.server.downloads.values()),None)")]:
   assert old in source,name
   (d/'server.py').write_text(source.replace(old,new,1))
-  r=subprocess.run([sys.executable,'-B','-m','unittest','test_server.ApiTests.test_processing_download_ticket_is_scoped_and_expires'],cwd=d,capture_output=True,text=True,env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'})
+  r=subprocess.run([sys.executable,'-B','-m','unittest','test_server'],cwd=d,capture_output=True,text=True,env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'})
   print(name+': '+('CAUGHT' if r.returncode else 'SURVIVED'),flush=True)
   if not r.returncode:sys.exit(1)

@@ -6,6 +6,7 @@ import html
 import http.client
 import io
 import json
+import math
 import os
 import platform
 import re
@@ -110,6 +111,7 @@ class Processing:
                 gps=ex.get_ifd(34853)
                 def coord(v):return float(v[0])+float(v[1])/60+float(v[2])/3600
                 if gps.get(2) and gps.get(4):result['gps']=[coord(gps[4])*(-1 if gps.get(3)=='W' else 1),coord(gps[2])*(-1 if gps.get(1)=='S' else 1)]
+                if 'gps' in result and not (all(math.isfinite(x) for x in result['gps']) and abs(result['gps'][0])<=180 and abs(result['gps'][1])<=90):result.pop('gps');result['metadataWarning']='GPS metadata was invalid.'
                 return result
         except Exception as e:return {'metadataWarning':'Metadata unavailable: '+str(e)[:160]}
     def command(self,args,timeout=120,input=None):
@@ -144,6 +146,16 @@ class Processing:
                     node=previous['services']['node-odx-1'];self.mode='cdi' if node.get('devices') else 'cuda' if node.get('gpus') else 'cpu'
                     self.authenticate();self.ready=True;self.message='Reconnected to the existing processing session. Finish its runs before changing acceleration.';return self.status()
             if mode=='cuda':
+                tool=self.config.get('cdiTool')
+                if tool and platform.system()=='Linux':
+                    executable=Path(tool)
+                    if executable.name!='nvidia-ctk' or not executable.is_file():raise ValueError('The configured local NVIDIA toolkit is missing.')
+                    spec=self.root/'nvidia-cdi.yaml'
+                    r=subprocess.run([str(executable),'cdi','generate','--nvidia-cdi-hook-path='+str(executable.with_name('nvidia-cdi-hook')),'--output='+str(spec)],capture_output=True,text=True,timeout=30)
+                    if r.returncode:raise ValueError('NVIDIA device configuration failed: '+r.stderr[-500:])
+                    for args in (['sudo','-n','install','-d','-m','755','/var/run/cdi'],['sudo','-n','install','-m','644',str(spec),'/var/run/cdi/odp-nvidia.yaml']):
+                        r=subprocess.run(args,capture_output=True,text=True,timeout=15)
+                        if r.returncode:raise ValueError('The local NVIDIA toolkit needs administrator setup. Install the standard NVIDIA Container Toolkit or use CPU.')
                 self.command(['pull',GPU_IMAGE],1800)
                 failures=[]
                 for flags,m in [(['--gpus','all'],'cuda'),(['--device','nvidia.com/gpu=all'],'cdi')]:
@@ -279,11 +291,19 @@ print('ODP_AUTH:'+json.dumps({'token':api_settings.JWT_ENCODE_HANDLER(p),'sessio
         filename(asset)
         req=urllib.request.Request(f'http://127.0.0.1:{self.port}/api/'+self.run_path(c,r)+'download/'+asset,headers={'Authorization':'JWT '+self.token})
         return urllib.request.urlopen(req,timeout=120)
+    def position_diagram(self,c):
+        gps=[f['gps'] for f in c['files'] if f.get('gps')]
+        if not gps:return '<p>No readable photo positions were recorded.</p>'
+        xs=[p[0] for p in gps];ys=[p[1] for p in gps];dx=max(max(xs)-min(xs),1e-6);dy=max(max(ys)-min(ys),1e-6)
+        scale=min(800/(dx*max(.01,math.cos(math.radians(sum(ys)/len(ys))))),300/dy)
+        sx=scale*max(.01,math.cos(math.radians(sum(ys)/len(ys))))
+        dots=''.join(f'<circle cx="{40+(p[0]-min(xs))*sx:.1f}" cy="{340-(p[1]-min(ys))*scale:.1f}" r="5" fill="#33744f"/>' for p in gps)
+        return '<svg viewBox="0 0 880 380" role="img" aria-label="Recorded photo positions"><rect width="880" height="380" fill="#edf3e8"/>'+dots+'</svg><p>Recorded photo positions in EXIF. North is up. This diagram does not establish image overlap, a flown track or survey accuracy.</p>'
     def report(self,cid):
         c=self.read(cid);e=lambda x:html.escape(str(x or ''));rows=''.join(f"<tr><td>{e(f['name'])}</td><td>{e(f['kind'])}</td><td>{f['size']:,}</td><td><code>{f['sha256']}</code></td></tr>" for f in c['files'])
         runs=''.join(f"<section><h2>{e(r.get('status'))} · {e(r.get('created'))}</h2><p>Engine mode: {e(r['mode'])}. Task: {e(r.get('task'))}</p><pre>{e(json.dumps(r.get('options'),indent=2))}</pre><p>Available outputs: {e(', '.join(r.get('assets',[])) or 'None recorded')}</p><p>{e(r.get('error'))}</p></section>" for r in c['runs'])
         mission=c.get('mission') or {};pts=mission.get('points',[])
-        return f'''<!doctype html><html><meta charset="utf-8"><title>{e(c['name'])} | ODP report</title><style>body{{font:15px/1.6 system-ui;max-width:1000px;margin:50px auto;color:#173732;padding:24px}}h1{{font-size:38px}}h2{{border-bottom:1px solid #ddd}}table{{border-collapse:collapse;width:100%;font-size:11px}}td,th{{text-align:left;padding:8px;border-bottom:1px solid #ddd;overflow-wrap:anywhere}}code{{font-size:9px}}pre{{white-space:pre-wrap}}section{{break-inside:avoid}}@media print{{body{{margin:0}}}}</style><p>OPENDRONEPLANNER · FLIGHT AND PROCESSING RECORD</p><h1>{e(c['name'])}</h1><p>Prepared {e(now())}<br>Client: {e(c.get('client'))}<br>Operator: {e(c.get('operator'))}</p><h2>Field record</h2><p>{e(c.get('notes')).replace(chr(10),'<br>')}</p><p>Linked plan: {e(mission.get('name','No plan linked'))}. Planned waypoints: {len(pts)}. Imported files: {len(c['files'])}.</p><h2>Findings</h2><p>{e(c.get('findings') or 'No reviewer findings entered.').replace(chr(10),'<br>')}</p><h2>Limitations and review</h2><p>{e(c.get('limitations') or 'No independent accuracy assessment recorded.').replace(chr(10),'<br>')}</p><p>Processing completion does not establish survey accuracy. Review coordinate and vertical references, independent checkpoints, image coverage and artifacts before relying on measurements. The linked route is a plan, not proof of the actual flight. This report includes location and media metadata.</p>{runs}<h2>Original media manifest</h2><table><thead><tr><th>Name</th><th>Kind</th><th>Bytes</th><th>SHA-256</th></tr></thead><tbody>{rows}</tbody></table></html>'''.encode()
+        return f'''<!doctype html><html><meta charset="utf-8"><title>{e(c['name'])} | ODP report</title><style>body{{font:15px/1.6 system-ui;max-width:1000px;margin:50px auto;color:#173732;padding:24px}}h1{{font-size:38px}}h2{{border-bottom:1px solid #ddd}}table{{border-collapse:collapse;width:100%;font-size:11px}}td,th{{text-align:left;padding:8px;border-bottom:1px solid #ddd;overflow-wrap:anywhere}}code{{font-size:9px}}pre{{white-space:pre-wrap}}section{{break-inside:avoid}}@media print{{body{{margin:0}}}}</style><p>OPENDRONEPLANNER · FLIGHT AND PROCESSING RECORD</p><h1>{e(c['name'])}</h1><p>Prepared {e(now())}<br>Client: {e(c.get('client'))}<br>Operator: {e(c.get('operator'))}</p><h2>Field record</h2><p>{e(c.get('notes')).replace(chr(10),'<br>')}</p><p>Linked plan: {e(mission.get('name','No plan linked'))}. Planned waypoints: {len(pts)}. Imported files: {len(c['files'])}.</p><h2>Findings</h2><p>{e(c.get('findings') or 'No reviewer findings entered.').replace(chr(10),'<br>')}</p><h2>Limitations and review</h2><p>{e(c.get('limitations') or 'No independent accuracy assessment recorded.').replace(chr(10),'<br>')}</p><p>Processing completion does not establish survey accuracy. Review coordinate and vertical references, independent checkpoints, image coverage and artifacts before relying on measurements. The linked route is a plan, not proof of the actual flight. This report includes location and media metadata.</p><h2>Recorded photo positions</h2>{self.position_diagram(c)}{runs}<h2>Original media manifest</h2><table><thead><tr><th>Name</th><th>Kind</th><th>Bytes</th><th>SHA-256</th></tr></thead><tbody>{rows}</tbody></table></html>'''.encode()
     def package(self,cid):
         c=self.read(cid);buf=io.BytesIO()
         with zipfile.ZipFile(buf,'w',zipfile.ZIP_DEFLATED) as z:

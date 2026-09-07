@@ -46,6 +46,15 @@ class ApiTests(unittest.TestCase):
     def test_bad_host_and_traversal(self):
         self.assertEqual(self.request('/api/status',{'Host':'attacker.invalid','X-ODP-Token':self.service.token})[0],403)
         self.assertEqual(self.request('/../../server.py')[0],404)
+    @unittest.skipIf(__import__('os').name=='nt','Creating symlinks requires extra Windows privileges')
+    def test_mac_bundle_resource_symlinks(self):
+        root=Path(self.temp.name)/'Frameworks';(root/'web').mkdir(parents=True)
+        resources=Path(self.temp.name)/'Resources';resources.mkdir();(resources/'index.html').write_text('ODP packaged page')
+        (root/'web/dist').symlink_to(resources,target_is_directory=True)
+        with patch.object(server,'ROOT',root):
+            self.assertEqual(self.request('/'),(200,b'ODP packaged page'))
+            self.assertEqual(self.request('/../../../capture.json')[0],404)
+
     def test_processing_download_ticket_is_scoped_and_expires(self):
         headers={'X-ODP-Token':self.service.token}
         code,body=self.request('/api/processing/create',headers,{'name':'Synthetic capture'})

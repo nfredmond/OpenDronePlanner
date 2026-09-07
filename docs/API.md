@@ -50,3 +50,27 @@ GET `/session.js` from the same origin supplies a short-lived token. API request
 | `/api/reset-slot` | POST | Archives the remembered slot choice |
 
 `--offline` blocks every controller operation. Terrain and controller work run in background workers and expose pollable jobs. No shell command or arbitrary-path execution endpoint exists.
+
+## Capture processing
+
+The same authenticated API manages local media and the app-owned WebODM stack. `--offline` disables physical controller operations; it does not disable image processing. Large media uses binary chunks rather than base64 JSON.
+
+| Endpoint after `/api/processing/` | Method | Body / result |
+|---|---|---|
+| `status` | GET | Engine status, CPU/CUDA mode, disk space, presets |
+| `start` | POST | `{mode: cpu or cuda, threads}`; returns a background job |
+| `stop` | POST | Stops services after active tasks finish/cancel; retains volumes |
+| `open` | POST | Opens full WebODM in the desktop tab; browser clients get a local login bridge |
+| `captures` | GET | Persistent flight-linked capture library |
+| `create` | POST | `{name, mission?}`; retains a snapshot of the linked plan |
+| `notes` | POST | `{id, name?, client?, operator?, notes?, findings?, limitations?}` |
+| `upload?id=…&name=…&offset=…&total=…` | POST | Raw binary, at most 8 MB per chunk, up to 64 GB per file; SHA-256 on completion |
+| `options` | GET | All options advertised by the live processing node |
+| `submit` | POST | `{id, preset, options}`; verifies originals, streams to a partial WebODM task, commits after upload |
+| `refresh` | POST | `{id}`; updates run status, progress and actual output inventory |
+| `control` | POST | `{id, run, action: cancel or restart}` |
+| `log?id=…&run=…` | GET | WebODM processing output |
+| `delivery` | POST | `{id, run, assets: [...]}`; background job streams selected outputs into a ZIP and hashes them |
+| `download-ticket` | POST | `{id, kind: report or packet or asset or prepared, run?, asset?, delivery?}`; short-lived, exact-download URL |
+
+Files are retained under the planner data folder's `processing/` directory. WebODM uses the separate `odp-processing` Compose project and named volumes. It does not overwrite an existing independent WebODM installation or another project's NodeODM services. The local API never prints or returns WebODM's account password or JWT. Complete reports and delivery packets contain private flight/media metadata; external sharing is a separate user action.
